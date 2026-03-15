@@ -70,3 +70,6 @@ APIFY_TOKEN = os.getenv("APIFY_TOKEN", "")
 # API-Football (безкоштовно 100 запитів/день)
 # https://www.api-football.com/
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
+
+# RapidAPI ключ (FlashLive Sports)
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "YOUR_RAPIDAPI_KEY")
