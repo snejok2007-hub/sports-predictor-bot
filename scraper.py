@@ -1,9 +1,5 @@
-"""
-📡 FlashLive Sports Scraper
-Отримує реальні матчі через RapidAPI FlashLive Sports
-"""
+"""📡 Sports Scraper — FlashLive API + демо-дані"""
 
-import asyncio
 import aiohttp
 import logging
 from datetime import datetime, date
@@ -15,31 +11,23 @@ logger = logging.getLogger(__name__)
 
 class FlashscoreScraper:
 
-    # FlashLive Sports API через RapidAPI
     RAPIDAPI_HOST = "flashlive-sports.p.rapidapi.com"
     RAPIDAPI_BASE = "https://flashlive-sports.p.rapidapi.com/v1"
 
-    # Sport IDs у FlashLive
-    SPORT_IDS = {
-        'football':   1,
-        'basketball': 3,
-        'tennis':     2,
-        'hockey':     4,
-    }
+    SPORT_IDS = {'football': 1, 'basketball': 3, 'tennis': 2, 'hockey': 4}
 
     def __init__(self):
         self.session = None
         self._match_cache = {}
 
-    def _get_headers(self) -> dict:
+    def _api_headers(self) -> dict:
         return {
             "x-rapidapi-host": self.RAPIDAPI_HOST,
             "x-rapidapi-key": RAPIDAPI_KEY,
-            "Content-Type": "application/json",
         }
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self.session is None or self.session.closed:
+    async def _get_session(self):
+        if not self.session or self.session.closed:
             self.session = aiohttp.ClientSession()
         return self.session
 
@@ -50,7 +38,7 @@ class FlashscoreScraper:
                 matches = await self.get_matches_by_sport(sport, limit=10)
                 all_matches.extend(matches)
             except Exception as e:
-                logger.warning(f"Помилка {sport}: {e}")
+                logger.warning(f"Error {sport}: {e}")
         all_matches.sort(key=lambda x: x.get('time', '99:99'))
         return all_matches[:limit]
 
@@ -58,181 +46,110 @@ class FlashscoreScraper:
         if sport == 'all':
             return await self.get_today_matches(limit)
 
-        # Якщо є RapidAPI ключ — використовуємо реальний API
-        if RAPIDAPI_KEY and RAPIDAPI_KEY != "YOUR_RAPIDAPI_KEY":
-            matches = await self._fetch_flashlive_matches(sport, limit)
+        if RAPIDAPI_KEY and RAPIDAPI_KEY not in ("YOUR_RAPIDAPI_KEY", ""):
+            matches = await self._fetch_api_matches(sport, limit)
             if matches:
                 return matches
 
-        # Резервний демо-режим
         return self._get_demo_matches(sport, limit)
 
-    async def _fetch_flashlive_matches(self, sport: str, limit: int) -> list[dict]:
-        """Отримати матчі з FlashLive Sports API"""
+    async def _fetch_api_matches(self, sport: str, limit: int) -> list[dict]:
         sport_id = self.SPORT_IDS.get(sport, 1)
         emoji = SPORTS_CONFIG.get(sport, {}).get('emoji', '⚽')
-        today = date.today().strftime('%d.%m.%Y')
 
         url = f"{self.RAPIDAPI_BASE}/events/list"
-        params = {
-            "sport_id": sport_id,
-            "locale": "uk_UA",
-            "timezone": "2",
-            "indent_days": "0",
-        }
+        params = {"sport_id": sport_id, "locale": "uk_UA", "timezone": "2", "indent_days": "0"}
 
         try:
             session = await self._get_session()
-            async with session.get(
-                url,
-                headers=self._get_headers(),
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
+            async with session.get(url, headers=self._api_headers(), params=params,
+                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
-                    logger.error(f"FlashLive API error: {resp.status}")
+                    logger.error(f"API {resp.status}")
                     return []
 
                 data = await resp.json()
-                return self._parse_flashlive_events(data, sport, emoji, limit)
+                return self._parse_events(data, sport, emoji, limit)
 
         except Exception as e:
-            logger.error(f"FlashLive fetch error: {e}")
+            logger.error(f"API fetch error: {e}")
             return []
 
-    def _parse_flashlive_events(self, data: dict, sport: str, emoji: str, limit: int) -> list[dict]:
-        """Парсинг відповіді FlashLive API"""
+    def _parse_events(self, data: dict, sport: str, emoji: str, limit: int) -> list[dict]:
         matches = []
 
-        try:
-            events = data.get('DATA', [])
-            for event in events[:limit * 3]:  # Беремо більше щоб після фільтрації залишилось достатньо
-                try:
-                    # Структура FlashLive API
-                    match_id = str(event.get('EVENT_ID', ''))
-                    home = event.get('HOME_NAME', 'Команда А')
-                    away = event.get('AWAY_NAME', 'Команда Б')
-                    league = event.get('LEAGUE_NAME', '')
-                    country = event.get('COUNTRY_NAME', '')
+        # FlashLive може повертати різні структури
+        events = (data.get('DATA') or data.get('data') or
+                  data.get('events') or data.get('results') or [])
 
-                    # Час матчу
-                    start_time = event.get('START_TIME', 0)
-                    if start_time:
-                        dt = datetime.fromtimestamp(int(start_time))
-                        time_str = dt.strftime('%H:%M')
-                    else:
-                        time_str = '--:--'
+        if not events:
+            logger.warning(f"No events in response: {list(data.keys())}")
+            return []
 
-                    # Статус (тільки майбутні та живі)
-                    status = event.get('EVENT_STAGE_TYPE', '')
+        for event in events:
+            try:
+                # Пробуємо різні назви полів
+                match_id = str(
+                    event.get('EVENT_ID') or event.get('id') or
+                    event.get('event_id') or ''
+                )
+                home = (event.get('HOME_NAME') or event.get('home_name') or
+                        event.get('home') or event.get('HOME_TEAM') or
+                        event.get('homeName') or '').strip()
+                away = (event.get('AWAY_NAME') or event.get('away_name') or
+                        event.get('away') or event.get('AWAY_TEAM') or
+                        event.get('awayName') or '').strip()
+                league = (event.get('LEAGUE_NAME') or event.get('league_name') or
+                          event.get('tournament') or event.get('TOURNAMENT_NAME') or '').strip()
+                country = (event.get('COUNTRY_NAME') or event.get('country') or '').strip()
 
-                    match = {
-                        'id': match_id,
-                        'sport': sport,
-                        'sport_emoji': emoji,
-                        'home': home,
-                        'away': away,
-                        'league': league,
-                        'country': country,
-                        'time': time_str,
-                        'date': date.today().isoformat(),
-                        'status': status,
-                        'home_form': [],
-                        'away_form': [],
-                        'h2h': [],
-                    }
-
-                    if not self._is_excluded(match):
-                        matches.append(match)
-                        self._match_cache[match_id] = match
-
-                    if len(matches) >= limit:
-                        break
-
-                except Exception as e:
-                    logger.debug(f"Parse event error: {e}")
+                # Пропускаємо якщо немає назв команд
+                if not home or not away:
                     continue
 
-        except Exception as e:
-            logger.error(f"Parse events error: {e}")
+                start = event.get('START_TIME') or event.get('start_time') or event.get('startTime') or 0
+                time_str = datetime.fromtimestamp(int(start)).strftime('%H:%M') if start else '--:--'
 
+                match = {
+                    'id': match_id or f"api_{sport}_{len(matches)}",
+                    'sport': sport, 'sport_emoji': emoji,
+                    'home': home, 'away': away,
+                    'league': league, 'country': country,
+                    'time': time_str, 'date': date.today().isoformat(),
+                    'home_form': [], 'away_form': [], 'h2h': [],
+                }
+
+                if not self._is_excluded(match):
+                    matches.append(match)
+                    self._match_cache[match['id']] = match
+
+                if len(matches) >= limit:
+                    break
+
+            except Exception as e:
+                logger.debug(f"Parse event error: {e}")
+                continue
+
+        logger.info(f"Parsed {len(matches)} matches for {sport}")
         return matches
 
     async def get_match_details(self, match_id: str) -> dict:
-        """Отримати деталі матчу з кешу або API"""
         if match_id in self._match_cache:
-            cached = self._match_cache[match_id]
-            # Спробуємо отримати статистику якщо є API ключ
-            if RAPIDAPI_KEY and RAPIDAPI_KEY != "YOUR_RAPIDAPI_KEY":
-                details = await self._fetch_match_stats(match_id, cached)
-                if details:
-                    return details
-            return cached
-
-        return self._get_empty_match(match_id)
-
-    async def _fetch_match_stats(self, match_id: str, base_match: dict) -> Optional[dict]:
-        """Отримати статистику конкретного матчу"""
-        url = f"{self.RAPIDAPI_BASE}/events/summary"
-        params = {"event_id": match_id, "locale": "uk_UA"}
-
-        try:
-            session = await self._get_session()
-            async with session.get(
-                url,
-                headers=self._get_headers(),
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                if resp.status != 200:
-                    return None
-
-                data = await resp.json()
-                summary = data.get('DATA', {})
-
-                # Оновлюємо матч детальними даними
-                match = {**base_match}
-
-                # Форма команд якщо є
-                home_form_raw = summary.get('HOME_FORM', '')
-                away_form_raw = summary.get('AWAY_FORM', '')
-                if home_form_raw:
-                    match['home_form'] = list(home_form_raw.upper())[:5]
-                if away_form_raw:
-                    match['away_form'] = list(away_form_raw.upper())[:5]
-
-                return match
-
-        except Exception as e:
-            logger.debug(f"Match stats error: {e}")
-            return None
+            return self._match_cache[match_id]
+        return {'id': match_id, 'sport': 'football', 'sport_emoji': '⚽',
+                'home': '?', 'away': '?', 'league': '', 'time': '--:--',
+                'date': date.today().isoformat(), 'home_form': [], 'away_form': []}
 
     def _is_excluded(self, match: dict) -> bool:
-        league = match.get('league', '')
-        country = match.get('country', '')
+        league = match.get('league', '').lower()
+        country = match.get('country', '').lower()
         for excl in EXCLUDED_LEAGUES:
-            if excl.lower() in league.lower():
+            if excl.lower() in league:
                 return True
-        for excl in EXCLUDED_COUNTRIES:
-            if excl.lower() in country.lower():
-                return True
-        # Додатково фільтруємо за країною
-        excluded_words = ['russia', 'russian', 'беларус', 'belarus', 'росія', 'росс']
-        for word in excluded_words:
-            if word in country.lower() or word in league.lower():
+        for word in ['russia', 'russian', 'беларус', 'belarus', 'росія', 'рос']:
+            if word in country or word in league:
                 return True
         return False
-
-    def _get_empty_match(self, match_id: str) -> dict:
-        return {
-            'id': match_id, 'sport': 'football', 'sport_emoji': '⚽',
-            'home': 'Команда А', 'away': 'Команда Б',
-            'league': 'Невідома ліга', 'time': '--:--',
-            'date': date.today().isoformat(),
-            'home_form': ['W', 'D', 'W', 'L', 'W'],
-            'away_form': ['L', 'W', 'W', 'W', 'D'],
-            'h2h': [], 'home_goals_avg': 1.5, 'away_goals_avg': 1.2,
-        }
 
     def _get_demo_matches(self, sport: str, limit: int = 10) -> list[dict]:
         emoji = SPORTS_CONFIG.get(sport, {}).get('emoji', '⚽')
@@ -262,22 +179,18 @@ class FlashscoreScraper:
                 ('Відень', 'Грац', 'ICEHL Австрія', '18:30'),
             ],
         }
-
-        sport_demos = demos.get(sport, demos['football'])
         matches = []
-        for i, (home, away, league, time) in enumerate(sport_demos[:limit]):
-            match_id = f"demo_{sport}_{i}"
-            match = {
-                'id': match_id, 'sport': sport, 'sport_emoji': emoji,
-                'home': home, 'away': away, 'league': league,
-                'time': time, 'date': date.today().isoformat(),
-                'home_form': ['W', 'W', 'D', 'W', 'L'],
-                'away_form': ['D', 'W', 'L', 'W', 'W'],
-                'home_goals_avg': round(1.0 + i * 0.3, 1),
-                'away_goals_avg': round(0.9 + i * 0.2, 1),
-            }
-            matches.append(match)
-            self._match_cache[match_id] = match
+        for i, (home, away, league, time) in enumerate(demos.get(sport, demos['football'])[:limit]):
+            mid = f"demo_{sport}_{i}"
+            m = {'id': mid, 'sport': sport, 'sport_emoji': emoji,
+                 'home': home, 'away': away, 'league': league, 'time': time,
+                 'date': date.today().isoformat(),
+                 'home_form': ['W', 'W', 'D', 'W', 'L'],
+                 'away_form': ['D', 'W', 'L', 'W', 'W'],
+                 'home_goals_avg': round(1.2 + i * 0.2, 1),
+                 'away_goals_avg': round(1.0 + i * 0.15, 1)}
+            matches.append(m)
+            self._match_cache[mid] = m
         return matches
 
     async def close(self):
