@@ -1,4 +1,4 @@
-"""📡 Sports Scraper — FlashLive API + демо-дані"""
+"""📡 Sports Scraper — FlashLive API"""
 
 import aiohttp
 import logging
@@ -13,14 +13,13 @@ class FlashscoreScraper:
 
     RAPIDAPI_HOST = "flashlive-sports.p.rapidapi.com"
     RAPIDAPI_BASE = "https://flashlive-sports.p.rapidapi.com/v1"
-
     SPORT_IDS = {'football': 1, 'basketball': 3, 'tennis': 2, 'hockey': 4}
 
     def __init__(self):
         self.session = None
         self._match_cache = {}
 
-    def _api_headers(self) -> dict:
+    def _api_headers(self):
         return {
             "x-rapidapi-host": self.RAPIDAPI_HOST,
             "x-rapidapi-key": RAPIDAPI_KEY,
@@ -45,93 +44,90 @@ class FlashscoreScraper:
     async def get_matches_by_sport(self, sport: str, limit: int = 20) -> list[dict]:
         if sport == 'all':
             return await self.get_today_matches(limit)
-
         if RAPIDAPI_KEY and RAPIDAPI_KEY not in ("YOUR_RAPIDAPI_KEY", ""):
-            matches = await self._fetch_api_matches(sport, limit)
+            matches = await self._fetch_tournaments_then_events(sport, limit)
             if matches:
                 return matches
-
         return self._get_demo_matches(sport, limit)
 
-    async def _fetch_api_matches(self, sport: str, limit: int) -> list[dict]:
+    async def _fetch_tournaments_then_events(self, sport: str, limit: int) -> list[dict]:
+        """Крок 1: отримати список турнірів, Крок 2: матчі по кожному"""
         sport_id = self.SPORT_IDS.get(sport, 1)
         emoji = SPORTS_CONFIG.get(sport, {}).get('emoji', '⚽')
 
-        url = f"{self.RAPIDAPI_BASE}/events/list"
-        params = {"sport_id": sport_id, "locale": "uk_UA", "timezone": "2", "indent_days": "0"}
+        # Endpoint для матчів дня
+        url = f"{self.RAPIDAPI_BASE}/events/schedule/by-sport"
+        params = {
+            "sport_id": sport_id,
+            "locale": "uk_UA",
+            "timezone": "2",
+            "indent_days": "0",
+        }
 
         try:
             session = await self._get_session()
-            async with session.get(url, headers=self._api_headers(), params=params,
-                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(
+                url, headers=self._api_headers(), params=params,
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
                 if resp.status != 200:
-                    logger.error(f"API {resp.status}")
+                    logger.error(f"Schedule API {resp.status}")
                     return []
-
                 data = await resp.json()
-                logger.warning(f"FlashLive raw keys: {list(data.keys())}, first item sample: {str(data)[:300]}")
-                return self._parse_events(data, sport, emoji, limit)
-
+                logger.warning(f"Schedule keys: {list(data.keys())[:5]}, sample: {str(data)[:400]}")
+                return self._parse_schedule(data, sport, emoji, limit)
         except Exception as e:
-            logger.error(f"API fetch error: {e}")
+            logger.error(f"Schedule fetch error: {e}")
             return []
 
-    def _parse_events(self, data: dict, sport: str, emoji: str, limit: int) -> list[dict]:
+    def _parse_schedule(self, data: dict, sport: str, emoji: str, limit: int) -> list[dict]:
         matches = []
 
-        # FlashLive може повертати різні структури
-        events = (data.get('DATA') or data.get('data') or
-                  data.get('events') or data.get('results') or [])
+        # API повертає турніри в DATA, всередині кожного є EVENT_LIST
+        tournaments = data.get('DATA', [])
 
-        if not events:
-            logger.warning(f"No events in response: {list(data.keys())}")
-            return []
+        for tournament in tournaments:
+            league = tournament.get('NAME', '')
+            country = tournament.get('COUNTRY_NAME', '') or tournament.get('NAME_PART_1', '')
 
-        for event in events:
-            try:
-                # Пробуємо різні назви полів
-                match_id = str(
-                    event.get('EVENT_ID') or event.get('id') or
-                    event.get('event_id') or ''
-                )
-                home = (event.get('HOME_NAME') or event.get('home_name') or
-                        event.get('home') or event.get('HOME_TEAM') or
-                        event.get('homeName') or '').strip()
-                away = (event.get('AWAY_NAME') or event.get('away_name') or
-                        event.get('away') or event.get('AWAY_TEAM') or
-                        event.get('awayName') or '').strip()
-                league = (event.get('LEAGUE_NAME') or event.get('league_name') or
-                          event.get('tournament') or event.get('TOURNAMENT_NAME') or '').strip()
-                country = (event.get('COUNTRY_NAME') or event.get('country') or '').strip()
+            # Пропускаємо заблоковані країни
+            if self._is_excluded({'league': league, 'country': country}):
+                continue
 
-                # Пропускаємо якщо немає назв команд
-                if not home or not away:
-                    continue
+            # Матчі всередині турніру
+            events = tournament.get('EVENT_LIST', []) or tournament.get('EVENTS', [])
 
-                start = event.get('START_TIME') or event.get('start_time') or event.get('startTime') or 0
-                time_str = datetime.fromtimestamp(int(start)).strftime('%H:%M') if start else '--:--'
+            for event in events:
+                try:
+                    match_id = str(event.get('EVENT_ID', '') or event.get('ID', ''))
+                    home = (event.get('HOME_NAME') or event.get('HOME_PARTICIPANT_NAME_ONE') or '').strip()
+                    away = (event.get('AWAY_NAME') or event.get('AWAY_PARTICIPANT_NAME_ONE') or '').strip()
 
-                match = {
-                    'id': match_id or f"api_{sport}_{len(matches)}",
-                    'sport': sport, 'sport_emoji': emoji,
-                    'home': home, 'away': away,
-                    'league': league, 'country': country,
-                    'time': time_str, 'date': date.today().isoformat(),
-                    'home_form': [], 'away_form': [], 'h2h': [],
-                }
+                    if not home or not away:
+                        continue
 
-                if not self._is_excluded(match):
+                    start = event.get('START_UTIME') or event.get('START_TIME') or 0
+                    time_str = datetime.fromtimestamp(int(start)).strftime('%H:%M') if start else '--:--'
+
+                    match = {
+                        'id': match_id or f"api_{sport}_{len(matches)}",
+                        'sport': sport, 'sport_emoji': emoji,
+                        'home': home, 'away': away,
+                        'league': league, 'country': country,
+                        'time': time_str, 'date': date.today().isoformat(),
+                        'home_form': [], 'away_form': [], 'h2h': [],
+                    }
                     matches.append(match)
                     self._match_cache[match['id']] = match
 
-                if len(matches) >= limit:
-                    break
+                    if len(matches) >= limit:
+                        return matches
 
-            except Exception as e:
-                logger.debug(f"Parse event error: {e}")
-                continue
+                except Exception as e:
+                    logger.debug(f"Event parse error: {e}")
+                    continue
 
-        logger.info(f"Parsed {len(matches)} matches for {sport}")
+        logger.info(f"Parsed {len(matches)} real matches for {sport}")
         return matches
 
     async def get_match_details(self, match_id: str) -> dict:
@@ -147,7 +143,7 @@ class FlashscoreScraper:
         for excl in EXCLUDED_LEAGUES:
             if excl.lower() in league:
                 return True
-        for word in ['russia', 'russian', 'беларус', 'belarus', 'росія', 'рос']:
+        for word in ['russia', 'russian', 'беларус', 'belarus', 'росія']:
             if word in country or word in league:
                 return True
         return False
