@@ -69,6 +69,7 @@ class FlashscoreScraper:
                     return []
 
                 data = await resp.json()
+                logger.warning(f"FlashLive raw keys: {list(data.keys())}, first item sample: {str(data)[:300]}")
                 return self._parse_events(data, sport, emoji, limit)
 
         except Exception as e:
